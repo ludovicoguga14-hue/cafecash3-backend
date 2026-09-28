@@ -1,0 +1,1 @@
+CREATE INDEX IF NOT EXISTS idx_audit_cafe ON audit_log(cafe_id, created_at DESC);
