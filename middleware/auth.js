@@ -1,353 +1,827 @@
 /**
- * CafeCash Authentication Middleware
- * Firebase ID token verification + University + Café isolation
+ * ═══════════════════════════════════════════════════════════════════
+ * CafeCash Authentication
+ * Handles: Login, Register, Google, Apple, Backend sync
+ * ═══════════════════════════════════════════════════════════════════
  */
 
-const { admin, firestore } = require('../firebase');
-const db = require('../config/db');
+(function () {
+    'use strict';
 
-async function authenticate(req, res, next) {
-    const header = req.headers.authorization;
+    // ═══════════════════════════════════════════════════════════════
+    // CONFIG
+    // ═══════════════════════════════════════════════════════════════
 
-    if (!header || !header.startsWith('Bearer ')) {
-        console.error('AUTH: No Bearer token');
-        return res.status(401).json({
-            success: false,
-            error: 'No token provided'
-        });
+    const API_BASE =
+        (location.hostname === 'localhost' ||
+         location.hostname === '127.0.0.1')
+            ? 'http://localhost:8080/api'
+            : 'https://cafecash3-backend-3.onrender.com/api';
+
+    let mode = 'login';
+
+    // ═══════════════════════════════════════════════════════════════
+    // DOM
+    // ═══════════════════════════════════════════════════════════════
+
+    const $ = (id) => document.getElementById(id);
+
+    function showError(message) {
+        const el = $('authError');
+
+        if (!el) {
+            console.error('AUTH ERROR:', message);
+            return;
+        }
+
+        el.textContent = message;
+        el.classList.add('show');
     }
 
-    const idToken = header.slice(7).trim();
+    function hideError() {
+        const el = $('authError');
 
-    if (!idToken) {
-        console.error('AUTH: Empty token');
-        return res.status(401).json({
-            success: false,
-            error: 'Empty token'
-        });
+        if (!el) return;
+
+        el.classList.remove('show');
     }
 
-    try {
-        // Verify Firebase ID token.
-        // Revocation check disabled temporarily so we can isolate
-        // the source of the authentication problem.
-        const decoded = await admin.auth().verifyIdToken(idToken);
+    function setLoading(loading) {
+        const btn = $('authSubmit');
 
-        console.log('AUTH SUCCESS');
-        console.log('Firebase UID:', decoded.uid);
-        console.log('Firebase project:', decoded.aud);
+        if (!btn) return;
 
-        // Load user profile
-        const userDoc = await firestore
-            .collection('users')
-            .doc(decoded.uid)
-            .get();
+        btn.disabled = loading;
 
-        if (!userDoc.exists) {
-            console.error(
-                'AUTH: Firebase user exists but Firestore profile does not:',
-                decoded.uid
+        btn.textContent = loading
+            ? (mode === 'login' ? 'Signing in…' : 'Creating…')
+            : (mode === 'login' ? 'Sign in' : 'Create account');
+    }
+
+    // ═══════════════════════════════════════════════════════════════
+    // LOGIN / REGISTER MODE
+    // ═══════════════════════════════════════════════════════════════
+
+    window.switchAuthMode = function (newMode) {
+        mode = newMode;
+
+        document.querySelectorAll('.auth-tab').forEach(tab => {
+            tab.classList.toggle(
+                'active',
+                tab.dataset.mode === newMode
+            );
+        });
+
+        const isRegister = newMode === 'register';
+
+        const nameField = $('nameField');
+        const universityField = $('universityField');
+        const cafeteriaField = $('cafeteriaField');
+        const titleEl = $('authTitle');
+        const subtitleEl = $('authSubtitle');
+        const submitBtn = $('authSubmit');
+        const passwordEl = $('password');
+
+        if (nameField) {
+            nameField.style.display = isRegister ? '' : 'none';
+        }
+
+        if (universityField) {
+            universityField.style.display = isRegister ? '' : 'none';
+        }
+
+        if (cafeteriaField) {
+            cafeteriaField.style.display = isRegister ? '' : 'none';
+        }
+
+        if (titleEl) {
+            titleEl.textContent =
+                isRegister
+                    ? 'Create your account'
+                    : 'Welcome back';
+        }
+
+        if (subtitleEl) {
+            subtitleEl.textContent =
+                isRegister
+                    ? 'Set up your café workspace in under 30 seconds'
+                    : 'Sign in to your CafeCash account';
+        }
+
+        if (submitBtn) {
+            submitBtn.textContent =
+                isRegister
+                    ? 'Create account'
+                    : 'Sign in';
+        }
+
+        if (passwordEl) {
+            passwordEl.autocomplete =
+                isRegister
+                    ? 'new-password'
+                    : 'current-password';
+        }
+
+        hideError();
+
+        const url = new URL(location.href);
+
+        if (isRegister) {
+            url.hash = 'register';
+        } else {
+            url.hash = '';
+        }
+
+        history.replaceState(null, '', url);
+    };
+
+    // ═══════════════════════════════════════════════════════════════
+    // GET FRESH FIREBASE TOKEN
+    // ═══════════════════════════════════════════════════════════════
+
+    async function getFreshFirebaseToken(user) {
+        if (!user) {
+            throw new Error('Firebase user was not found.');
+        }
+
+        const idToken = await user.getIdToken(true);
+
+        if (!idToken) {
+            throw new Error(
+                'Firebase did not provide an ID token.'
+            );
+        }
+
+        console.log('════════ FIREBASE TOKEN ════════');
+        console.log('UID:', user.uid);
+        console.log('Email:', user.email);
+        console.log('Token received:', true);
+        console.log('Token length:', idToken.length);
+        console.log('════════════════════════════════');
+
+        return idToken;
+    }
+
+    // ═══════════════════════════════════════════════════════════════
+    // BACKEND SYNC
+    // ═══════════════════════════════════════════════════════════════
+
+    async function syncWithBackend(idToken, payload) {
+
+        console.log('════════ BACKEND SYNC ════════');
+        console.log('URL:', API_BASE + '/auth/sync');
+        console.log('Payload:', payload);
+        console.log('Token exists:', !!idToken);
+        console.log('Token length:', idToken?.length);
+        console.log('══════════════════════════════');
+
+        let res;
+
+        try {
+
+            res = await fetch(
+                API_BASE + '/auth/sync',
+                {
+                    method: 'POST',
+
+                    headers: {
+                        'Content-Type': 'application/json',
+                        'Authorization': 'Bearer ' + idToken
+                    },
+
+                    body: JSON.stringify(payload)
+                }
             );
 
-            return res.status(401).json({
-                success: false,
-                error: 'User profile not found'
-            });
+        } catch (networkError) {
+
+            console.error(
+                '❌ NETWORK ERROR:',
+                networkError
+            );
+
+            throw new Error(
+                'Could not reach the CafeCash backend. Check that Render is running.'
+            );
         }
 
-        const user = {
-            uid: decoded.uid,
-            ...userDoc.data()
-        };
+        let data;
 
-        // Auto-downgrade expired premium
-        if (user.plan === 'premium' && user.planExpiresAt) {
-            const expiresAt = user.planExpiresAt.toDate
-                ? user.planExpiresAt.toDate()
-                : new Date(user.planExpiresAt);
+        try {
 
-            if (expiresAt < new Date()) {
-                await firestore
-                    .collection('users')
-                    .doc(decoded.uid)
-                    .update({
-                        plan: 'basic',
-                        planExpiresAt: null
-                    });
+            data = await res.json();
 
-                user.plan = 'basic';
-                user.planExpiresAt = null;
-            }
+        } catch (jsonError) {
+
+            console.error(
+                '❌ INVALID BACKEND RESPONSE:',
+                jsonError
+            );
+
+            throw new Error(
+                `Backend returned an invalid response (HTTP ${res.status}).`
+            );
         }
 
-        // Resolve active university + café
-        const context = await resolveContext(
-            decoded.uid,
-            req,
-            user
+        console.log('════════ BACKEND RESPONSE ════════');
+        console.log('HTTP status:', res.status);
+        console.log('Status text:', res.statusText);
+        console.log('Response:', data);
+        console.log('══════════════════════════════════');
+
+        if (!res.ok || data.success === false) {
+
+            console.error(
+                '❌ BACKEND SYNC FAILED:',
+                {
+                    status: res.status,
+                    statusText: res.statusText,
+                    data: data
+                }
+            );
+
+            const error = new Error(
+                data.error ||
+                data.message ||
+                `Backend error: HTTP ${res.status}`
+            );
+
+            error.status = res.status;
+            error.code = data.code || null;
+            error.backendResponse = data;
+
+            throw error;
+        }
+
+        console.log(
+            '✅ BACKEND SYNC SUCCESSFUL'
         );
 
-        // Attach user context
-        req.user = user;
-
-        req.user.universityId =
-            context.university?.id || null;
-
-        req.user.university =
-            context.university || null;
-
-        req.user.cafeId =
-            context.cafe?.id || null;
-
-        req.user.activeCafe =
-            context.cafe || null;
-
-        req.user.timezone =
-            context.cafe?.timezone ||
-            'Africa/Johannesburg';
-
-        req.user.role =
-            context.role ||
-            'manager';
-
-        next();
-
-    } catch (err) {
-
-        console.error('════════ AUTH ERROR ════════');
-        console.error('Code:', err.code);
-        console.error('Message:', err.message);
-        console.error('Name:', err.name);
-        console.error('════════════════════════════');
-
-        let status = 403;
-
-        if (err.code === 'auth/id-token-expired') {
-            status = 401;
-        }
-
-        if (err.code === 'auth/argument-error') {
-            status = 401;
-        }
-
-        return res.status(status).json({
-            success: false,
-            error: err.message || 'Invalid or unauthorized token',
-            code: err.code || 'unknown'
-        });
-    }
-}
-
-
-// ═══════════════════════════════════════════════════════════════
-// RESOLVE UNIVERSITY + CAFÉ
-// ═══════════════════════════════════════════════════════════════
-
-async function resolveContext(uid, req, user) {
-
-    const universitiesSnap =
-        await firestore
-            .collection('users')
-            .doc(uid)
-            .collection('universities')
-            .get();
-
-    let allCafes = [];
-    const universities = [];
-
-    for (const uDoc of universitiesSnap.docs) {
-
-        const university = {
-            id: uDoc.id,
-            ...uDoc.data()
-        };
-
-        universities.push(university);
-
-        const cafesSnap =
-            await firestore
-                .collection('users')
-                .doc(uid)
-                .collection('universities')
-                .doc(uDoc.id)
-                .collection('cafes')
-                .get();
-
-        cafesSnap.forEach(cDoc => {
-
-            allCafes.push({
-                id: cDoc.id,
-                ...cDoc.data(),
-                universityId: uDoc.id,
-                universityName: university.name
-            });
-
-        });
+        return data;
     }
 
-    // Café from request header
-    const headerCafeId =
-        req.headers['x-cafe-id'];
+    // ═══════════════════════════════════════════════════════════════
+    // SAVE SESSION
+    // ═══════════════════════════════════════════════════════════════
 
-    if (headerCafeId) {
+    function saveSession(idToken, user) {
 
-        const cafe =
-            allCafes.find(
-                c => c.id === headerCafeId
+        if (!idToken) {
+            throw new Error(
+                'Cannot save session: Firebase token is missing.'
             );
+        }
 
-        if (cafe) {
+        localStorage.setItem(
+            'cafecash_token',
+            idToken
+        );
 
-            const university =
-                universities.find(
-                    u => u.id === cafe.universityId
+        sessionStorage.setItem(
+            'cafecash_user',
+            JSON.stringify(user)
+        );
+
+        console.log('✅ CafeCash session saved');
+    }
+
+    // ═══════════════════════════════════════════════════════════════
+    // REDIRECT
+    // ═══════════════════════════════════════════════════════════════
+
+    function redirectToDashboard() {
+        window.location.href = 'dashboard.html';
+    }
+
+    // ═══════════════════════════════════════════════════════════════
+    // MAIN SUBMIT
+    // ═══════════════════════════════════════════════════════════════
+
+    function handleSubmit(e) {
+
+        e.preventDefault();
+        e.stopPropagation();
+
+        hideError();
+
+        const email =
+            ($('email')?.value || '').trim();
+
+        const password =
+            $('password')?.value || '';
+
+        const name =
+            ($('name')?.value || '').trim();
+
+        const universityName =
+            ($('universityName')?.value || '').trim();
+
+        const cafeteriaName =
+            ($('cafeteriaName')?.value || '').trim();
+
+        // ═══════════════════════════════════════════════════════════
+        // VALIDATION
+        // ═══════════════════════════════════════════════════════════
+
+        if (!email || !password) {
+            showError(
+                'Email and password are required'
+            );
+            return;
+        }
+
+        if (password.length < 6) {
+            showError(
+                'Password must be at least 6 characters'
+            );
+            return;
+        }
+
+        if (mode === 'register' && !name) {
+            showError(
+                'Please enter your full name'
+            );
+            return;
+        }
+
+        // ═══════════════════════════════════════════════════════════
+        // FIREBASE CHECK
+        // ═══════════════════════════════════════════════════════════
+
+        if (
+            typeof firebase === 'undefined' ||
+            !firebase.auth
+        ) {
+            showError(
+                'Firebase is not loaded. Please refresh the page.'
+            );
+            return;
+        }
+
+        setLoading(true);
+
+        (async () => {
+
+            try {
+
+                let userCredential;
+
+                // ═══════════════════════════════════════════════════
+                // REGISTER
+                // ═══════════════════════════════════════════════════
+
+                if (mode === 'register') {
+
+                    userCredential =
+                        await firebase
+                            .auth()
+                            .createUserWithEmailAndPassword(
+                                email,
+                                password
+                            );
+
+                    const firebaseUser =
+                        userCredential.user;
+
+                    if (name) {
+
+                        await firebaseUser.updateProfile({
+                            displayName: name
+                        });
+
+                    }
+
+                }
+
+                // ═══════════════════════════════════════════════════
+                // LOGIN
+                // ═══════════════════════════════════════════════════
+
+                else {
+
+                    userCredential =
+                        await firebase
+                            .auth()
+                            .signInWithEmailAndPassword(
+                                email,
+                                password
+                            );
+                }
+
+                const firebaseUser =
+                    userCredential.user;
+
+                console.log(
+                    '✅ Firebase authentication successful'
                 );
 
-            return {
-                university,
-                cafe,
-                role: user.role || 'manager'
-            };
-        }
-    }
-
-    // University from request header
-    const headerUniversityId =
-        req.headers['x-university-id'];
-
-    if (headerUniversityId) {
-
-        const university =
-            universities.find(
-                u => u.id === headerUniversityId
-            );
-
-        if (university) {
-
-            const cafe =
-                allCafes.find(
-                    c => c.universityId === university.id
-                ) || null;
-
-            return {
-                university,
-                cafe,
-                role: user.role || 'manager'
-            };
-        }
-    }
-
-    // Last active café
-    if (user.lastActiveCafeId) {
-
-        const cafe =
-            allCafes.find(
-                c => c.id === user.lastActiveCafeId
-            );
-
-        if (cafe) {
-
-            const university =
-                universities.find(
-                    u => u.id === cafe.universityId
+                console.log(
+                    'Firebase UID:',
+                    firebaseUser.uid
                 );
 
-            return {
-                university,
-                cafe,
-                role: user.role || 'manager'
-            };
-        }
+                // ═══════════════════════════════════════════════════
+                // FORCE FRESH TOKEN
+                // ═══════════════════════════════════════════════════
+
+                const idToken =
+                    await getFreshFirebaseToken(
+                        firebaseUser
+                    );
+
+                // ═══════════════════════════════════════════════════
+                // BACKEND PAYLOAD
+                // ═══════════════════════════════════════════════════
+
+                const syncPayload = {
+                    name:
+                        name ||
+                        firebaseUser.displayName ||
+                        undefined
+                };
+
+                if (mode === 'register') {
+
+                    if (universityName) {
+                        syncPayload.universityName =
+                            universityName;
+                    }
+
+                    if (cafeteriaName) {
+                        syncPayload.cafeteriaName =
+                            cafeteriaName;
+                    }
+                }
+
+                // ═══════════════════════════════════════════════════
+                // BACKEND SYNC
+                // ═══════════════════════════════════════════════════
+
+                let syncData;
+
+                try {
+
+                    syncData =
+                        await syncWithBackend(
+                            idToken,
+                            syncPayload
+                        );
+
+                } catch (syncErr) {
+
+                    console.error(
+                        '❌ BACKEND SYNC ERROR:',
+                        syncErr
+                    );
+
+                    throw new Error(
+                        `Backend sync failed (${syncErr.status || 'unknown'}): ${
+                            syncErr.message ||
+                            'Unknown backend error'
+                        }`
+                    );
+                }
+
+                // ═══════════════════════════════════════════════════
+                // SAVE SESSION
+                // ═══════════════════════════════════════════════════
+
+                saveSession(
+                    idToken,
+                    syncData.data
+                );
+
+                console.log(
+                    '✅ Login complete'
+                );
+
+                // ═══════════════════════════════════════════════════
+                // DASHBOARD
+                // ═══════════════════════════════════════════════════
+
+                redirectToDashboard();
+
+            } catch (err) {
+
+                console.error(
+                    '❌ AUTH ERROR:',
+                    err
+                );
+
+                let msg =
+                    err.message ||
+                    'Authentication failed';
+
+                // ═══════════════════════════════════════════════════
+                // FIREBASE ERRORS
+                // ═══════════════════════════════════════════════════
+
+                if (
+                    msg.includes(
+                        'email-already-in-use'
+                    )
+                ) {
+
+                    msg =
+                        'This email is already registered. Try signing in instead.';
+
+                } else if (
+                    msg.includes(
+                        'wrong-password'
+                    ) ||
+                    msg.includes(
+                        'invalid-credential'
+                    ) ||
+                    msg.includes(
+                        'INVALID_LOGIN_CREDENTIALS'
+                    )
+                ) {
+
+                    msg =
+                        'Incorrect email or password';
+
+                } else if (
+                    msg.includes(
+                        'user-not-found'
+                    )
+                ) {
+
+                    msg =
+                        'No account found with this email. Create one instead?';
+
+                } else if (
+                    msg.includes(
+                        'weak-password'
+                    )
+                ) {
+
+                    msg =
+                        'Password is too weak. Use at least 6 characters.';
+
+                } else if (
+                    msg.includes(
+                        'invalid-email'
+                    )
+                ) {
+
+                    msg =
+                        'Please enter a valid email address';
+
+                } else if (
+                    msg.includes(
+                        'network-request-failed'
+                    )
+                ) {
+
+                    msg =
+                        'Network error. Check your internet connection.';
+
+                } else if (
+                    msg.includes(
+                        'api-key-not-valid'
+                    ) ||
+                    msg.includes(
+                        'invalid-api-key'
+                    )
+                ) {
+
+                    msg =
+                        'Firebase config is missing or invalid.';
+
+                } else if (
+                    msg.includes(
+                        'operation-not-allowed'
+                    )
+                ) {
+
+                    msg =
+                        'Email/Password sign-in is not enabled in Firebase Console.';
+
+                } else if (
+                    msg.includes(
+                        'too-many-requests'
+                    )
+                ) {
+
+                    msg =
+                        'Too many attempts. Wait a moment and try again.';
+                }
+
+                // ═══════════════════════════════════════════════════
+                // SHOW ACTUAL ERROR
+                // ═══════════════════════════════════════════════════
+
+                showError(msg);
+
+                setLoading(false);
+            }
+
+        })();
     }
 
-    // First available café
-    if (allCafes.length) {
+    // ═══════════════════════════════════════════════════════════════
+    // GOOGLE
+    // ═══════════════════════════════════════════════════════════════
 
-        const cafe = allCafes[0];
+    window.handleGoogleSignIn = async function () {
 
-        const university =
-            universities.find(
-                u => u.id === cafe.universityId
+        hideError();
+
+        if (
+            typeof firebase === 'undefined' ||
+            !firebase.auth
+        ) {
+            showError(
+                'Firebase is not loaded. Please refresh the page.'
+            );
+            return;
+        }
+
+        try {
+
+            const provider =
+                new firebase.auth.GoogleAuthProvider();
+
+            const result =
+                await firebase
+                    .auth()
+                    .signInWithPopup(provider);
+
+            const firebaseUser =
+                result.user;
+
+            const idToken =
+                await getFreshFirebaseToken(
+                    firebaseUser
+                );
+
+            const syncData =
+                await syncWithBackend(
+                    idToken,
+                    {
+                        name:
+                            firebaseUser.displayName
+                    }
+                );
+
+            saveSession(
+                idToken,
+                syncData.data
             );
 
-        return {
-            university,
-            cafe,
-            role: user.role || 'manager'
-        };
-    }
+            redirectToDashboard();
 
-    // University but no café
-    return {
-        university: universities[0] || null,
-        cafe: null,
-        role: user.role || 'manager'
+        } catch (err) {
+
+            if (
+                err.code ===
+                'auth/popup-closed-by-user'
+            ) {
+                return;
+            }
+
+            console.error(
+                'Google sign-in error:',
+                err
+            );
+
+            showError(
+                err.message ||
+                'Google sign-in failed'
+            );
+        }
     };
-}
 
+    // ═══════════════════════════════════════════════════════════════
+    // APPLE
+    // ═══════════════════════════════════════════════════════════════
 
-// ═══════════════════════════════════════════════════════════════
-// PREMIUM
-// ═══════════════════════════════════════════════════════════════
+    window.handleAppleSignIn = async function () {
 
-function requirePremium(req, res, next) {
+        hideError();
 
-    if (req.user.plan !== 'premium') {
+        if (
+            typeof firebase === 'undefined' ||
+            !firebase.auth
+        ) {
+            showError(
+                'Firebase is not loaded. Please refresh the page.'
+            );
+            return;
+        }
 
-        return res.status(403).json({
-            success: false,
-            error: 'Premium plan required',
-            upgrade: true
-        });
+        try {
+
+            const provider =
+                new firebase.auth.OAuthProvider(
+                    'apple.com'
+                );
+
+            const result =
+                await firebase
+                    .auth()
+                    .signInWithPopup(provider);
+
+            const firebaseUser =
+                result.user;
+
+            const idToken =
+                await getFreshFirebaseToken(
+                    firebaseUser
+                );
+
+            const syncData =
+                await syncWithBackend(
+                    idToken,
+                    {
+                        name:
+                            firebaseUser.displayName
+                    }
+                );
+
+            saveSession(
+                idToken,
+                syncData.data
+            );
+
+            redirectToDashboard();
+
+        } catch (err) {
+
+            if (
+                err.code ===
+                'auth/popup-closed-by-user'
+            ) {
+                return;
+            }
+
+            console.error(
+                'Apple sign-in error:',
+                err
+            );
+
+            showError(
+                err.message ||
+                'Apple sign-in failed'
+            );
+        }
+    };
+
+    // ═══════════════════════════════════════════════════════════════
+    // INIT
+    // ═══════════════════════════════════════════════════════════════
+
+    function init() {
+
+        const form = $('authForm');
+
+        if (form) {
+
+            form.addEventListener(
+                'submit',
+                handleSubmit
+            );
+
+        } else {
+
+            console.error(
+                '❌ authForm not found in DOM'
+            );
+        }
+
+        if (location.hash === '#register') {
+            window.switchAuthMode('register');
+        }
+
+        /*
+         * Do NOT automatically redirect when a token exists.
+         *
+         * This prevents an old/invalid token from creating:
+         *
+         * login → dashboard → 403 → login → dashboard
+         */
+
+        console.log(
+            '✅ CafeCash auth.js loaded'
+        );
     }
 
-    next();
-}
-
-
-// ═══════════════════════════════════════════════════════════════
-// CAFÉ REQUIRED
-// ═══════════════════════════════════════════════════════════════
-
-function requireCafe(req, res, next) {
-
-    if (!req.user.cafeId) {
-
-        return res.status(400).json({
-            success: false,
-            error: 'No active cafeteria selected'
-        });
-    }
-
-    next();
-}
-
-
-// ═══════════════════════════════════════════════════════════════
-// UNIVERSITY ADMIN
-// ═══════════════════════════════════════════════════════════════
-
-function requireUniversityAdmin(req, res, next) {
+    // ═══════════════════════════════════════════════════════════════
+    // START
+    // ═══════════════════════════════════════════════════════════════
 
     if (
-        !['admin', 'superadmin']
-            .includes(req.user.role)
+        document.readyState === 'loading'
     ) {
 
-        return res.status(403).json({
-            success: false,
-            error: 'University admin access required'
-        });
+        document.addEventListener(
+            'DOMContentLoaded',
+            init
+        );
+
+    } else {
+
+        init();
     }
 
-    next();
-}
-
-
-module.exports = {
-    authenticate,
-    requirePremium,
-    requireCafe,
-    requireUniversityAdmin,
-    resolveContext
-};
+})();
