@@ -8,21 +8,13 @@ const router = express.Router();
 
 /**
  * Sync Firebase user with CafeCash backend.
- * Creates the user profile + first university + first cafeteria
- * when the Firebase account is new.
+ * Creates the user profile, university and cafeteria for a new user.
  */
 router.post('/sync', async (req, res) => {
     try {
-        console.log('========================================');
-        console.log('AUTH SYNC REQUEST');
-        console.log('Origin:', req.headers.origin || '(none)');
-        console.log('Authorization header:', req.headers.authorization ? 'PRESENT' : 'MISSING');
-        console.log('========================================');
-
         const header = req.headers.authorization;
 
         if (!header || !header.startsWith('Bearer ')) {
-            console.error('AUTH SYNC ERROR: No Bearer token');
             return res.status(401).json({
                 success: false,
                 error: 'No token provided'
@@ -32,22 +24,20 @@ router.post('/sync', async (req, res) => {
         const idToken = header.slice(7).trim();
 
         if (!idToken) {
-            console.error('AUTH SYNC ERROR: Empty token');
             return res.status(401).json({
                 success: false,
                 error: 'Empty authentication token'
             });
         }
 
-        console.log('Verifying Firebase ID token...');
+        console.log('AUTH SYNC: verifying Firebase token...');
 
         const decoded = await admin.auth().verifyIdToken(idToken);
 
-        console.log('AUTH SYNC TOKEN VERIFIED');
+        console.log('AUTH SYNC: token verified');
         console.log('Firebase UID:', decoded.uid);
         console.log('Firebase email:', decoded.email || '(none)');
-        console.log('Token audience:', decoded.aud);
-        console.log('Token issuer:', decoded.iss);
+        console.log('Firebase project:', decoded.aud);
 
         const {
             name,
@@ -68,9 +58,8 @@ router.post('/sync', async (req, res) => {
         if (!userDoc.exists) {
             isNew = true;
 
-            console.log('Creating new CafeCash user:', decoded.uid);
+            console.log('AUTH SYNC: creating new user...');
 
-            // Create user profile
             await userRef.set({
                 name: name || decoded.name || 'User',
                 email: decoded.email || '',
@@ -82,9 +71,8 @@ router.post('/sync', async (req, res) => {
                 createdAt: new Date()
             });
 
-            console.log('User profile created');
+            console.log('AUTH SYNC: user created');
 
-            // Create first university
             const uniRef = await userRef
                 .collection('universities')
                 .add({
@@ -96,9 +84,8 @@ router.post('/sync', async (req, res) => {
                     createdAt: new Date()
                 });
 
-            console.log('University created:', uniRef.id);
+            console.log('AUTH SYNC: university created');
 
-            // Create first cafeteria
             const cafeRef = await uniRef
                 .collection('cafes')
                 .add({
@@ -111,15 +98,14 @@ router.post('/sync', async (req, res) => {
                     createdAt: new Date()
                 });
 
-            console.log('Cafeteria created:', cafeRef.id);
+            console.log('AUTH SYNC: cafeteria created');
 
             await userRef.update({
                 lastActiveCafeId: cafeRef.id
             });
 
-            console.log('Active cafeteria saved');
+            console.log('AUTH SYNC: active cafeteria saved');
 
-            // Audit logging should not prevent account creation
             try {
                 if (db && typeof db.logAudit === 'function') {
                     db.logAudit({
@@ -127,16 +113,14 @@ router.post('/sync', async (req, res) => {
                         action: 'user_created'
                     });
                 }
-            } catch (auditErr) {
+            } catch (auditError) {
                 console.warn(
-                    'Audit log failed:',
-                    auditErr.message
+                    'AUTH SYNC: audit log failed:',
+                    auditError.message
                 );
             }
-
-            console.log('New CafeCash account setup complete');
         } else {
-            console.log('Existing CafeCash user:', decoded.uid);
+            console.log('AUTH SYNC: existing user');
         }
 
         const updatedDoc = await userRef.get();
@@ -147,32 +131,24 @@ router.post('/sync', async (req, res) => {
             );
         }
 
-        const userData = {
-            uid: decoded.uid,
-            ...updatedDoc.data(),
-            isNew
-        };
-
-        console.log('AUTH SYNC SUCCESS');
-        console.log('UID:', decoded.uid);
-        console.log('New user:', isNew);
-        console.log('========================================');
+        console.log('AUTH SYNC: SUCCESS');
 
         return res.json({
             success: true,
-            data: userData
+            data: {
+                uid: decoded.uid,
+                ...updatedDoc.data(),
+                isNew
+            }
         });
 
     } catch (err) {
-        console.error('');
-        console.error('════════════════════════════════════════');
+        console.error('========================================');
         console.error('AUTH SYNC FAILED');
         console.error('Code:', err.code || '(none)');
         console.error('Name:', err.name || '(none)');
         console.error('Message:', err.message || '(none)');
-        console.error('Stack:', err.stack || '(none)');
-        console.error('════════════════════════════════════════');
-        console.error('');
+        console.error('========================================');
 
         let status = 500;
 
@@ -193,8 +169,11 @@ router.post('/sync', async (req, res) => {
 });
 
 
+/**
+ * Return the currently authenticated CafeCash user.
+ */
 router.get('/me', authenticate, (req, res) => {
-    res.json({
+    return res.json({
         success: true,
         data: req.user
     });
