@@ -1,6 +1,4 @@
-📄 1. Backend/firebase.js
 
-javascript
 /**
  * ═══════════════════════════════════════════════════════════════════
  * CafeCash — Firebase Admin SDK Initialization
