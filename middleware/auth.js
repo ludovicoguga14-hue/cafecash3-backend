@@ -1,25 +1,41 @@
 /**
- * Firebase ID token verification + University + Café isolation.
+ * ═══════════════════════════════════════════════════════════════════
+ * CafeCash — Authentication Middleware
+ * ═══════════════════════════════════════════════════════════════════
+ *
+ * Verifies Firebase ID token from Authorization header.
+ * Attaches user + active café + timezone to req.user.
  */
-const { admin, firestore } = require('../firebase');
-const db = require('../config/db');
 
+const { admin, firestore } = require('../firebase');
+
+/**
+ * Verify Firebase ID token and load user profile.
+ */
 async function authenticate(req, res, next) {
     const header = req.headers.authorization;
+
     if (!header || !header.startsWith('Bearer ')) {
-        return res.status(401).json({ success: false, error: 'No token provided' });
+        return res.status(401).json({
+            success: false,
+            error: 'No authentication token provided'
+        });
     }
 
     const idToken = header.slice(7);
 
     try {
-        // 1. Verify Firebase ID token
+        // 1. Verify the Firebase ID token
         const decoded = await admin.auth().verifyIdToken(idToken, true);
 
-        // 2. Load user profile
+        // 2. Load the user's profile from Firestore
         const userDoc = await firestore.collection('users').doc(decoded.uid).get();
+
         if (!userDoc.exists) {
-            return res.status(401).json({ success: false, error: 'User profile not found' });
+            return res.status(401).json({
+                success: false,
+                error: 'User profile not found. Please complete signup.'
+            });
         }
 
         const user = { uid: decoded.uid, ...userDoc.data() };
@@ -29,6 +45,7 @@ async function authenticate(req, res, next) {
             const expiresAt = user.planExpiresAt.toDate
                 ? user.planExpiresAt.toDate()
                 : new Date(user.planExpiresAt);
+
             if (expiresAt < new Date()) {
                 await firestore.collection('users').doc(decoded.uid).update({
                     plan: 'basic',
@@ -39,22 +56,30 @@ async function authenticate(req, res, next) {
             }
         }
 
-        // 4. Resolve active university + café (ownership verified)
+        // 4. Resolve active café (with ownership verification)
         const context = await resolveContext(decoded.uid, req, user);
 
-        // 5. Attach — ORDER MATTERS
+        // 5. Attach to request — ORDER MATTERS
         req.user = user;
-        req.user.universityId = context.university?.id || null;
+        req.user.universityId = context.university ? context.university.id : null;
         req.user.university = context.university || null;
-        req.user.cafeId = context.cafe?.id || null;
+        req.user.cafeId = context.cafe ? context.cafe.id : null;
         req.user.activeCafe = context.cafe || null;
-        req.user.timezone = context.cafe?.timezone || 'Africa/Johannesburg';
-        req.user.role = context.role || 'manager';
+        req.user.timezone = context.cafe ? context.cafe.timezone : 'Africa/Johannesburg';
+        req.user.role = user.role || 'manager';
 
         next();
+
     } catch (err) {
-        console.error('Auth error:', err.code || err.message);
+        console.error('❌ Auth error:', {
+            code: err.code,
+            message: err.message,
+            path: req.path,
+            method: req.method
+        });
+
         const status = err.code === 'auth/id-token-expired' ? 401 : 403;
+
         return res.status(status).json({
             success: false,
             error: err.code === 'auth/id-token-expired'
@@ -65,62 +90,64 @@ async function authenticate(req, res, next) {
 }
 
 /**
- * Resolves the active university and café with ownership verification.
+ * Resolves the active university and café for the user.
  * Priority:
- *   1. X-Cafe-Id header (verified owned)
- *   2. X-University-Id header (verified)
+ *   1. X-Cafe-Id header
+ *   2. X-University-Id header
  *   3. user.lastActiveCafeId
- *   4. First owned café
+ *   4. First café owned
  */
 async function resolveContext(uid, req, user) {
-    // Get all universities this user has access to
-    const universitiesSnap = await firestore.collection('users').doc(uid)
-        .collection('universities').get();
+    // Load all universities owned by user
+    const universitiesSnap = await firestore
+        .collection('users').doc(uid)
+        .collection('universities')
+        .get();
+
+    if (universitiesSnap.empty) {
+        return { university: null, cafe: null };
+    }
+
+    const universities = universitiesSnap.docs.map(d => ({
+        id: d.id,
+        ...d.data()
+    }));
 
     // Collect all cafés across all universities
-    let allCafes = [];
-    const universities = [];
-
+    const allCafes = [];
     for (const uDoc of universitiesSnap.docs) {
-        const university = { id: uDoc.id, ...uDoc.data() };
-        universities.push(university);
-
-        const cafesSnap = await firestore.collection('users').doc(uid)
+        const cafesSnap = await firestore
+            .collection('users').doc(uid)
             .collection('universities').doc(uDoc.id)
-            .collection('cafes').get();
+            .collection('cafes')
+            .get();
 
         cafesSnap.forEach(cDoc => {
             allCafes.push({
                 id: cDoc.id,
                 ...cDoc.data(),
-                universityId: uDoc.id,
-                universityName: university.name
+                universityId: uDoc.id
             });
         });
     }
 
-    // If user has no universities yet, they need onboarding
-    if (!universities.length) {
-        return { university: null, cafe: null, role: 'manager' };
-    }
-
-    // 1. Header-based café selection
+    // 1. Header: X-Cafe-Id
     const headerCafeId = req.headers['x-cafe-id'];
     if (headerCafeId) {
         const cafe = allCafes.find(c => c.id === headerCafeId);
         if (cafe) {
             const university = universities.find(u => u.id === cafe.universityId);
-            return { university, cafe, role: user.role || 'manager' };
+            return { university, cafe };
         }
     }
 
-    // 2. Header-based university selection
+    // 2. Header: X-University-Id
     const headerUniversityId = req.headers['x-university-id'];
     if (headerUniversityId) {
         const university = universities.find(u => u.id === headerUniversityId);
         if (university) {
             const cafe = allCafes.find(c => c.universityId === university.id) || null;
-            return { university, cafe, role: user.role || 'manager' };
+            return { university, cafe };
         }
     }
 
@@ -129,23 +156,26 @@ async function resolveContext(uid, req, user) {
         const cafe = allCafes.find(c => c.id === user.lastActiveCafeId);
         if (cafe) {
             const university = universities.find(u => u.id === cafe.universityId);
-            return { university, cafe, role: user.role || 'manager' };
+            return { university, cafe };
         }
     }
 
     // 4. First owned café
-    if (allCafes.length) {
+    if (allCafes.length > 0) {
         const cafe = allCafes[0];
         const university = universities.find(u => u.id === cafe.universityId);
-        return { university, cafe, role: user.role || 'manager' };
+        return { university, cafe };
     }
 
     // Fallback: university but no café
-    return { university: universities[0], cafe: null, role: user.role || 'manager' };
+    return { university: universities[0], cafe: null };
 }
 
+/**
+ * Require Premium plan.
+ */
 function requirePremium(req, res, next) {
-    if (req.user.plan !== 'premium') {
+    if (!req.user || req.user.plan !== 'premium') {
         return res.status(403).json({
             success: false,
             error: 'Premium plan required',
@@ -155,16 +185,15 @@ function requirePremium(req, res, next) {
     next();
 }
 
+/**
+ * Require an active café.
+ */
 function requireCafe(req, res, next) {
-    if (!req.user.cafeId) {
-        return res.status(400).json({ success: false, error: 'No active cafeteria selected' });
-    }
-    next();
-}
-
-function requireUniversityAdmin(req, res, next) {
-    if (!['admin', 'superadmin'].includes(req.user.role)) {
-        return res.status(403).json({ success: false, error: 'University admin access required' });
+    if (!req.user || !req.user.cafeId) {
+        return res.status(400).json({
+            success: false,
+            error: 'No active cafeteria selected'
+        });
     }
     next();
 }
@@ -173,6 +202,6 @@ module.exports = {
     authenticate,
     requirePremium,
     requireCafe,
-    requireUniversityAdmin,
     resolveContext
 };
+
