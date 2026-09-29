@@ -1,3 +1,7 @@
+/**
+ * Firebase Admin SDK initialization.
+ * Loads service account from env var (preferred) or file path (fallback).
+ */
 const admin = require('firebase-admin');
 const fs = require('fs');
 const path = require('path');
@@ -8,12 +12,21 @@ if (!admin.apps.length) {
     const saPath = process.env.FIREBASE_SERVICE_ACCOUNT_PATH;
     const saJson = process.env.FIREBASE_SERVICE_ACCOUNT;
 
-    console.log('   FIREBASE_SERVICE_ACCOUNT_PATH:', saPath ? '(set)' : '(not set)');
-    console.log('   FIREBASE_SERVICE_ACCOUNT:', saJson ? (set, ${saJson.length} chars) : '(not set)');
+    if (saPath) {
+        console.log('   FIREBASE_SERVICE_ACCOUNT_PATH: (set)');
+    } else {
+        console.log('   FIREBASE_SERVICE_ACCOUNT_PATH: (not set)');
+    }
+
+    if (saJson) {
+        console.log('   FIREBASE_SERVICE_ACCOUNT: (set, ' + saJson.length + ' chars)');
+    } else {
+        console.log('   FIREBASE_SERVICE_ACCOUNT: (not set)');
+    }
 
     let serviceAccount = null;
 
-    // Try inline JSON first (preferred on Render)
+    // 1. Try inline JSON first (preferred on Render)
     if (saJson) {
         try {
             serviceAccount = JSON.parse(saJson);
@@ -23,7 +36,7 @@ if (!admin.apps.length) {
         }
     }
 
-    // Fallback to file path
+    // 2. Fallback to file path
     if (!serviceAccount && saPath) {
         try {
             const fullPath = path.isAbsolute(saPath)
@@ -31,12 +44,13 @@ if (!admin.apps.length) {
                 : path.resolve(process.cwd(), saPath);
             const raw = fs.readFileSync(fullPath, 'utf8');
             serviceAccount = JSON.parse(raw);
-            console.log('   ✅ Loaded service account from file:', fullPath);
+            console.log('   ✅ Loaded service account from file: ' + fullPath);
         } catch (err) {
             console.error('   ❌ Failed to load from path:', err.message);
         }
     }
 
+    // 3. Initialize Firebase Admin
     if (serviceAccount) {
         admin.initializeApp({
             credential: admin.credential.cert(serviceAccount),
