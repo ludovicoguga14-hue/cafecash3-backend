@@ -1,4 +1,3 @@
-
 const express = require('express');
 const { authenticate } = require('../middleware/auth');
 const { firestore, admin } = require('../firebase');
@@ -8,7 +7,9 @@ const router = express.Router();
 
 /**
  * Sync user after Firebase Auth.
- * Creates user profile + first university + first cafeteria.
+ * Creates/repairs user profile + first university + first cafeteria.
+ *
+ * Safe to call on EVERY login — it heals missing data.
  */
 router.post('/sync', async (req, res, next) => {
     try {
@@ -21,9 +22,7 @@ router.post('/sync', async (req, res, next) => {
             });
         }
 
-        const decoded = await admin.auth().verifyIdToken(
-            header.slice(7)
-        );
+        const decoded = await admin.auth().verifyIdToken(header.slice(7));
 
         const {
             name,
@@ -31,16 +30,16 @@ router.post('/sync', async (req, res, next) => {
             cafeteriaName,
             timezone,
             currency
-        } = req.body;
+        } = req.body || {};
 
-        const userRef = firestore
-            .collection('users')
-            .doc(decoded.uid);
-
-        const userDoc = await userRef.get();
+        const userRef = firestore.collection('users').doc(decoded.uid);
+        let userDoc = await userRef.get();
 
         let isNew = false;
 
+        // ─────────────────────────────────────────────────────────
+        // 1. Create user profile if missing
+        // ─────────────────────────────────────────────────────────
         if (!userDoc.exists) {
             isNew = true;
 
@@ -55,39 +54,84 @@ router.post('/sync', async (req, res, next) => {
                 createdAt: new Date()
             });
 
-            const uniRef = await userRef
-                .collection('universities')
-                .add({
-                    name: universityName || 'My University',
-                    country: 'South Africa',
-                    timezone: timezone || 'Africa/Johannesburg',
-                    currency: currency || 'ZAR',
-                    icon: '🎓',
-                    createdAt: new Date()
-                });
-
-            const cafeRef = await uniRef
-                .collection('cafes')
-                .add({
-                    name: cafeteriaName || 'Main Cafeteria',
-                    type: 'cafeteria',
-                    timezone: timezone || 'Africa/Johannesburg',
-                    currency: currency || 'ZAR',
-                    icon: '🍽️',
-                    isActive: true,
-                    createdAt: new Date()
-                });
-
-            await userRef.update({
-                lastActiveCafeId: cafeRef.id
-            });
-
             db.logAudit({
                 uid: decoded.uid,
                 action: 'user_created'
             });
+
+            // Refresh userDoc
+            userDoc = await userRef.get();
         }
 
+        // ─────────────────────────────────────────────────────────
+        // 2. Ensure user has at least one university
+        // ─────────────────────────────────────────────────────────
+        const unisSnap = await userRef.collection('universities').limit(1).get();
+
+        let universityRef;
+
+        if (unisSnap.empty) {
+            // Create default university
+            universityRef = await userRef.collection('universities').add({
+                name: universityName || 'My University',
+                country: 'South Africa',
+                timezone: timezone || 'Africa/Johannesburg',
+                currency: currency || 'ZAR',
+                icon: '🎓',
+                createdAt: new Date()
+            });
+
+            db.logAudit({
+                uid: decoded.uid,
+                universityId: universityRef.id,
+                action: 'university_created'
+            });
+        } else {
+            universityRef = unisSnap.docs[0].ref;
+        }
+
+        // ─────────────────────────────────────────────────────────
+        // 3. Ensure university has at least one café
+        // ─────────────────────────────────────────────────────────
+        const cafesSnap = await universityRef.collection('cafes').limit(1).get();
+
+        let cafeRef;
+
+        if (cafesSnap.empty) {
+            // Create default café
+            cafeRef = await universityRef.collection('cafes').add({
+                name: cafeteriaName || 'Main Cafeteria',
+                type: 'cafeteria',
+                timezone: timezone || 'Africa/Johannesburg',
+                currency: currency || 'ZAR',
+                icon: '🍽️',
+                isActive: true,
+                createdAt: new Date()
+            });
+
+            db.logAudit({
+                uid: decoded.uid,
+                universityId: universityRef.id,
+                cafeId: cafeRef.id,
+                action: 'cafe_created'
+            });
+        } else {
+            cafeRef = cafesSnap.docs[0].ref;
+        }
+
+        // ─────────────────────────────────────────────────────────
+        // 4. Ensure user's lastActiveCafeId is set
+        // ─────────────────────────────────────────────────────────
+        const userData = userDoc.data();
+        if (!userData.lastActiveCafeId) {
+            await userRef.update({
+                lastActiveCafeId: cafeRef.id
+            });
+        }
+
+        // ─────────────────────────────────────────────────────────
+        // 5. Return fresh user data
+        // ─────────────────────────────────────────────────────────
         const updatedDoc = await userRef.get();
 
         res.json({
@@ -100,6 +144,7 @@ router.post('/sync', async (req, res, next) => {
         });
 
     } catch (err) {
+        console.error('Sync error:', err);
         next(err);
     }
 });
@@ -112,4 +157,3 @@ router.get('/me', authenticate, (req, res) => {
 });
 
 module.exports = router;
-```
