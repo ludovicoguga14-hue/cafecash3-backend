@@ -1,71 +1,42 @@
-/**
- * Environment validation — fails fast in production.
- * Accepts EITHER FIREBASE_SERVICE_ACCOUNT or FIREBASE_SERVICE_ACCOUNT_PATH
- */
-
-const REQUIRED_PROD = [
-    'FIREBASE_PROJECT_ID',
-    'CORS_ORIGIN',
-    'JWT_SECRET'
-];
-
-const RECOMMENDED_PROD = [
-    'OPENAI_API_KEY',
-    'STRIPE_SECRET_KEY'
-];
+const REQUIRED_PROD = ['FIREBASE_PROJECT_ID', 'CORS_ORIGIN', 'JWT_SECRET'];
+const RECOMMENDED_PROD = ['OPENAI_API_KEY', 'STRIPE_SECRET_KEY'];
 
 function validateEnv() {
     const isProd = process.env.NODE_ENV === 'production';
-
-    // ─── Basic required vars ───
     const missing = REQUIRED_PROD.filter(k => !process.env[k]);
 
-    // ─── Firebase credentials: accept EITHER method ───
-    const hasFirebaseInline = !!process.env.FIREBASE_SERVICE_ACCOUNT;
-    const hasFirebasePath = !!process.env.FIREBASE_SERVICE_ACCOUNT_PATH;
-    const hasFirebaseB64 = !!process.env.FIREBASE_SERVICE_ACCOUNT_B64;
+    const hasB64 = !!process.env.FIREBASE_SERVICE_ACCOUNT_B64;
+    const hasPath = !!process.env.FIREBASE_SERVICE_ACCOUNT_PATH;
+    const hasInline = !!process.env.FIREBASE_SERVICE_ACCOUNT;
 
-    if (!hasFirebaseInline && !hasFirebasePath && !hasFirebaseB64) {
-        missing.push('FIREBASE_SERVICE_ACCOUNT (or _PATH or _B64)');
+    if (!hasB64 && !hasPath && !hasInline) {
+        missing.push('FIREBASE_SERVICE_ACCOUNT_B64 (or _PATH or _ACCOUNT)');
     }
 
     if (isProd && missing.length) {
-        console.error('');
-        console.error('❌ FATAL: Missing required env vars in production:');
+        console.error('❌ FATAL: Missing env vars:');
         missing.forEach(k => console.error('   • ' + k));
-        console.error('');
-        console.error('Refusing to start.');
-        console.error('');
         process.exit(1);
     }
 
     if (!isProd && missing.length) {
-        missing.forEach(k => console.warn('⚠️  ' + k + ' not set (dev mode OK)'));
+        missing.forEach(k => console.warn('⚠️  ' + k + ' not set (dev)'));
     }
 
-    // ─── JWT secret length check ───
     if (isProd && process.env.JWT_SECRET && process.env.JWT_SECRET.length < 32) {
-        console.error('❌ JWT_SECRET must be at least 32 characters in production');
+        console.error('❌ JWT_SECRET must be 32+ chars');
         process.exit(1);
     }
 
-    // ─── Recommendations ───
     const rec = RECOMMENDED_PROD.filter(k => !process.env[k]);
     if (isProd && rec.length) {
-        console.warn('💡 Recommended env vars not set: ' + rec.join(', '));
+        console.warn('💡 Recommended: ' + rec.join(', '));
     }
 
-    // ─── Firebase credential method ───
-    if (hasFirebaseB64) {
-        console.log('✅ Env validated (' + (isProd ? 'production' : 'development') + ')');
-        console.log('   Firebase: Base64 env var');
-    } else if (hasFirebasePath) {
-        console.log('✅ Env validated (' + (isProd ? 'production' : 'development') + ')');
-        console.log('   Firebase: file path (' + process.env.FIREBASE_SERVICE_ACCOUNT_PATH + ')');
-    } else if (hasFirebaseInline) {
-        console.log('✅ Env validated (' + (isProd ? 'production' : 'development') + ')');
-        console.log('   Firebase: inline JSON env var');
-    }
+    console.log('✅ Env validated (' + (isProd ? 'production' : 'development') + ')');
+    if (hasB64) console.log('   Firebase: Base64 env var');
+    else if (hasPath) console.log('   Firebase: file path');
+    else if (hasInline) console.log('   Firebase: inline JSON');
 }
 
 module.exports = { validateEnv };
