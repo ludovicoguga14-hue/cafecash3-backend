@@ -10,6 +10,7 @@ const rateLimit = require('express-rate-limit');
 const { errorHandler, notFound } = require('./middleware/error');
 
 const app = express();
+app.set('trust proxy', 1);
 const PORT = process.env.PORT || 8080;
 
 app.use(helmet({ crossOriginResourcePolicy: false }));
