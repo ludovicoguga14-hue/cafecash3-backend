@@ -7,37 +7,23 @@ const db = require('../config/db');
 const router = express.Router();
 
 /**
- * Sync Firebase user with CafeCash backend.
- * Creates the user profile, university and cafeteria for a new user.
+ * Sync user after Firebase Auth.
+ * Creates user profile + first university + first cafeteria.
  */
-router.post('/sync', async (req, res) => {
+router.post('/sync', async (req, res, next) => {
     try {
         const header = req.headers.authorization;
 
-        if (!header || !header.startsWith('Bearer ')) {
+        if (!header?.startsWith('Bearer ')) {
             return res.status(401).json({
                 success: false,
-                error: 'No token provided'
+                error: 'No token'
             });
         }
 
-        const idToken = header.slice(7).trim();
-
-        if (!idToken) {
-            return res.status(401).json({
-                success: false,
-                error: 'Empty authentication token'
-            });
-        }
-
-        console.log('AUTH SYNC: verifying Firebase token...');
-
-        const decoded = await admin.auth().verifyIdToken(idToken);
-
-        console.log('AUTH SYNC: token verified');
-        console.log('Firebase UID:', decoded.uid);
-        console.log('Firebase email:', decoded.email || '(none)');
-        console.log('Firebase project:', decoded.aud);
+        const decoded = await admin.auth().verifyIdToken(
+            header.slice(7)
+        );
 
         const {
             name,
@@ -45,7 +31,7 @@ router.post('/sync', async (req, res) => {
             cafeteriaName,
             timezone,
             currency
-        } = req.body || {};
+        } = req.body;
 
         const userRef = firestore
             .collection('users')
@@ -58,11 +44,9 @@ router.post('/sync', async (req, res) => {
         if (!userDoc.exists) {
             isNew = true;
 
-            console.log('AUTH SYNC: creating new user...');
-
             await userRef.set({
                 name: name || decoded.name || 'User',
-                email: decoded.email || '',
+                email: decoded.email,
                 plan: 'basic',
                 planExpiresAt: null,
                 avatar: '👤',
@@ -70,8 +54,6 @@ router.post('/sync', async (req, res) => {
                 role: 'manager',
                 createdAt: new Date()
             });
-
-            console.log('AUTH SYNC: user created');
 
             const uniRef = await userRef
                 .collection('universities')
@@ -83,8 +65,6 @@ router.post('/sync', async (req, res) => {
                     icon: '🎓',
                     createdAt: new Date()
                 });
-
-            console.log('AUTH SYNC: university created');
 
             const cafeRef = await uniRef
                 .collection('cafes')
@@ -98,42 +78,19 @@ router.post('/sync', async (req, res) => {
                     createdAt: new Date()
                 });
 
-            console.log('AUTH SYNC: cafeteria created');
-
             await userRef.update({
                 lastActiveCafeId: cafeRef.id
             });
 
-            console.log('AUTH SYNC: active cafeteria saved');
-
-            try {
-                if (db && typeof db.logAudit === 'function') {
-                    db.logAudit({
-                        uid: decoded.uid,
-                        action: 'user_created'
-                    });
-                }
-            } catch (auditError) {
-                console.warn(
-                    'AUTH SYNC: audit log failed:',
-                    auditError.message
-                );
-            }
-        } else {
-            console.log('AUTH SYNC: existing user');
+            db.logAudit({
+                uid: decoded.uid,
+                action: 'user_created'
+            });
         }
 
         const updatedDoc = await userRef.get();
 
-        if (!updatedDoc.exists) {
-            throw new Error(
-                'User profile could not be loaded after synchronization'
-            );
-        }
-
-        console.log('AUTH SYNC: SUCCESS');
-
-        return res.json({
+        res.json({
             success: true,
             data: {
                 uid: decoded.uid,
@@ -143,42 +100,16 @@ router.post('/sync', async (req, res) => {
         });
 
     } catch (err) {
-        console.error('========================================');
-        console.error('AUTH SYNC FAILED');
-        console.error('Code:', err.code || '(none)');
-        console.error('Name:', err.name || '(none)');
-        console.error('Message:', err.message || '(none)');
-        console.error('========================================');
-
-        let status = 500;
-
-        if (
-            err.code === 'auth/id-token-expired' ||
-            err.code === 'auth/invalid-id-token' ||
-            err.code === 'auth/argument-error'
-        ) {
-            status = 401;
-        }
-
-        return res.status(status).json({
-            success: false,
-            error: err.message || 'Authentication synchronization failed',
-            code: err.code || 'unknown'
-        });
+        next(err);
     }
 });
 
-
-/**
- * Return the currently authenticated CafeCash user.
- */
 router.get('/me', authenticate, (req, res) => {
-    return res.json({
+    res.json({
         success: true,
         data: req.user
     });
 });
-
 
 module.exports = router;
 ```
