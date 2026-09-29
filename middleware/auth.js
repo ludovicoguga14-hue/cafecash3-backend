@@ -1,8 +1,3 @@
-/**
- * CafeCash Authentication Middleware
- * Firebase ID token verification + University + Café isolation.
- */
-
 const { admin, firestore } = require('../firebase');
 const db = require('../config/db');
 
@@ -10,46 +5,30 @@ async function authenticate(req, res, next) {
     const header = req.headers.authorization;
 
     if (!header || !header.startsWith('Bearer ')) {
-        console.error('AUTH: No Bearer token');
-
         return res.status(401).json({
             success: false,
             error: 'No token provided'
         });
     }
 
-    const idToken = header.slice(7).trim();
-
-    if (!idToken) {
-        console.error('AUTH: Empty token');
-
-        return res.status(401).json({
-            success: false,
-            error: 'Empty token'
-        });
-    }
+    const idToken = header.slice(7);
 
     try {
-        // Verify Firebase ID token.
-        // Revocation check disabled for now while diagnosing authentication.
+        // Temporary diagnostic version — do NOT use the revocation check yet
         const decoded = await admin.auth().verifyIdToken(idToken);
 
+        console.log('========================================');
         console.log('AUTH SUCCESS');
         console.log('Firebase UID:', decoded.uid);
-        console.log('Firebase project:', decoded.aud);
+        console.log('Firebase project:', decoded.firebase?.tenant || 'default');
+        console.log('========================================');
 
-        // Load user profile
         const userDoc = await firestore
             .collection('users')
             .doc(decoded.uid)
             .get();
 
         if (!userDoc.exists) {
-            console.error(
-                'AUTH: Firebase user exists but Firestore profile does not:',
-                decoded.uid
-            );
-
             return res.status(401).json({
                 success: false,
                 error: 'User profile not found'
@@ -61,7 +40,6 @@ async function authenticate(req, res, next) {
             ...userDoc.data()
         };
 
-        // Auto-downgrade expired premium
         if (user.plan === 'premium' && user.planExpiresAt) {
             const expiresAt = user.planExpiresAt.toDate
                 ? user.planExpiresAt.toDate()
@@ -81,84 +59,49 @@ async function authenticate(req, res, next) {
             }
         }
 
-        // Resolve active university + café
-        const context = await resolveContext(
-            decoded.uid,
-            req,
-            user
-        );
+        const context = await resolveContext(decoded.uid, req, user);
 
-        // Attach user context
         req.user = user;
-
-        req.user.universityId =
-            context.university?.id || null;
-
-        req.user.university =
-            context.university || null;
-
-        req.user.cafeId =
-            context.cafe?.id || null;
-
-        req.user.activeCafe =
-            context.cafe || null;
-
+        req.user.universityId = context.university?.id || null;
+        req.user.university = context.university || null;
+        req.user.cafeId = context.cafe?.id || null;
+        req.user.activeCafe = context.cafe || null;
         req.user.timezone =
-            context.cafe?.timezone ||
-            'Africa/Johannesburg';
-
-        req.user.role =
-            context.role ||
-            'manager';
+            context.cafe?.timezone || 'Africa/Johannesburg';
+        req.user.role = context.role || 'manager';
 
         next();
 
     } catch (err) {
-
         console.error('════════ AUTH ERROR ════════');
         console.error('Code:', err.code);
         console.error('Message:', err.message);
         console.error('Name:', err.name);
         console.error('════════════════════════════');
 
-        let status = 403;
-
-        if (err.code === 'auth/id-token-expired') {
-            status = 401;
-        }
-
-        if (err.code === 'auth/argument-error') {
-            status = 401;
-        }
+        const status =
+            err.code === 'auth/id-token-expired' ? 401 : 403;
 
         return res.status(status).json({
             success: false,
-            error: err.message ||
-                'Invalid or unauthorized token',
+            error: err.message || 'Invalid or unauthorized token',
             code: err.code || 'unknown'
         });
     }
 }
 
 
-// ═══════════════════════════════════════════════════════════════
-// RESOLVE UNIVERSITY + CAFÉ
-// ═══════════════════════════════════════════════════════════════
-
 async function resolveContext(uid, req, user) {
-
-    const universitiesSnap =
-        await firestore
-            .collection('users')
-            .doc(uid)
-            .collection('universities')
-            .get();
+    const universitiesSnap = await firestore
+        .collection('users')
+        .doc(uid)
+        .collection('universities')
+        .get();
 
     let allCafes = [];
     const universities = [];
 
     for (const uDoc of universitiesSnap.docs) {
-
         const university = {
             id: uDoc.id,
             ...uDoc.data()
@@ -166,44 +109,41 @@ async function resolveContext(uid, req, user) {
 
         universities.push(university);
 
-        const cafesSnap =
-            await firestore
-                .collection('users')
-                .doc(uid)
-                .collection('universities')
-                .doc(uDoc.id)
-                .collection('cafes')
-                .get();
+        const cafesSnap = await firestore
+            .collection('users')
+            .doc(uid)
+            .collection('universities')
+            .doc(uDoc.id)
+            .collection('cafes')
+            .get();
 
         cafesSnap.forEach(cDoc => {
-
             allCafes.push({
                 id: cDoc.id,
                 ...cDoc.data(),
                 universityId: uDoc.id,
                 universityName: university.name
             });
-
         });
     }
 
-    // Café selected by request header
-    const headerCafeId =
-        req.headers['x-cafe-id'];
+    if (!universities.length) {
+        return {
+            university: null,
+            cafe: null,
+            role: 'manager'
+        };
+    }
+
+    const headerCafeId = req.headers['x-cafe-id'];
 
     if (headerCafeId) {
-
-        const cafe =
-            allCafes.find(
-                c => c.id === headerCafeId
-            );
+        const cafe = allCafes.find(c => c.id === headerCafeId);
 
         if (cafe) {
-
-            const university =
-                universities.find(
-                    u => u.id === cafe.universityId
-                );
+            const university = universities.find(
+                u => u.id === cafe.universityId
+            );
 
             return {
                 university,
@@ -213,19 +153,15 @@ async function resolveContext(uid, req, user) {
         }
     }
 
-    // University selected by request header
     const headerUniversityId =
         req.headers['x-university-id'];
 
     if (headerUniversityId) {
-
-        const university =
-            universities.find(
-                u => u.id === headerUniversityId
-            );
+        const university = universities.find(
+            u => u.id === headerUniversityId
+        );
 
         if (university) {
-
             const cafe =
                 allCafes.find(
                     c => c.universityId === university.id
@@ -239,20 +175,15 @@ async function resolveContext(uid, req, user) {
         }
     }
 
-    // Last active café
     if (user.lastActiveCafeId) {
-
-        const cafe =
-            allCafes.find(
-                c => c.id === user.lastActiveCafeId
-            );
+        const cafe = allCafes.find(
+            c => c.id === user.lastActiveCafeId
+        );
 
         if (cafe) {
-
-            const university =
-                universities.find(
-                    u => u.id === cafe.universityId
-                );
+            const university = universities.find(
+                u => u.id === cafe.universityId
+            );
 
             return {
                 university,
@@ -262,15 +193,11 @@ async function resolveContext(uid, req, user) {
         }
     }
 
-    // First available café
     if (allCafes.length) {
-
         const cafe = allCafes[0];
-
-        const university =
-            universities.find(
-                u => u.id === cafe.universityId
-            );
+        const university = universities.find(
+            u => u.id === cafe.universityId
+        );
 
         return {
             university,
@@ -279,23 +206,16 @@ async function resolveContext(uid, req, user) {
         };
     }
 
-    // University exists but no café
     return {
-        university: universities[0] || null,
+        university: universities[0],
         cafe: null,
         role: user.role || 'manager'
     };
 }
 
 
-// ═══════════════════════════════════════════════════════════════
-// PREMIUM
-// ═══════════════════════════════════════════════════════════════
-
 function requirePremium(req, res, next) {
-
     if (req.user.plan !== 'premium') {
-
         return res.status(403).json({
             success: false,
             error: 'Premium plan required',
@@ -307,14 +227,8 @@ function requirePremium(req, res, next) {
 }
 
 
-// ═══════════════════════════════════════════════════════════════
-// CAFÉ REQUIRED
-// ═══════════════════════════════════════════════════════════════
-
 function requireCafe(req, res, next) {
-
     if (!req.user.cafeId) {
-
         return res.status(400).json({
             success: false,
             error: 'No active cafeteria selected'
@@ -325,17 +239,8 @@ function requireCafe(req, res, next) {
 }
 
 
-// ═══════════════════════════════════════════════════════════════
-// UNIVERSITY ADMIN
-// ═══════════════════════════════════════════════════════════════
-
 function requireUniversityAdmin(req, res, next) {
-
-    if (
-        !['admin', 'superadmin']
-            .includes(req.user.role)
-    ) {
-
+    if (!['admin', 'superadmin'].includes(req.user.role)) {
         return res.status(403).json({
             success: false,
             error: 'University admin access required'
