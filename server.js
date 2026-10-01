@@ -68,15 +68,30 @@ app.use((req, res) => {
     res.status(404).json({ success: false, error: 'Endpoint not found' });
 });
 
-// ERROR
+// ═══════════════════════════════════════════════════════════════════
+// ERROR HANDLER — now always shows the REAL error for debugging
+// ═══════════════════════════════════════════════════════════════════
 app.use((err, req, res, next) => {
-    console.error('❌ Error:', { message: err.message, path: req.path });
+    console.error('');
+    console.error('❌ ═══════════════════════════════════════════════════════');
+    console.error('❌ SERVER ERROR');
+    console.error('❌ Path   :', req.method, req.path);
+    console.error('❌ Message:', err.message);
+    console.error('❌ Code   :', err.code || '(none)');
+    console.error('❌ Stack  :', err.stack);
+    console.error('❌ ═══════════════════════════════════════════════════════');
+    console.error('');
+
     if (err.message === 'Not allowed by CORS') {
         return res.status(403).json({ success: false, error: 'Origin not allowed' });
     }
+
+    // Return the actual error message so the frontend shows it
     res.status(err.status || 500).json({
         success: false,
-        error: process.env.NODE_ENV === 'production' ? 'Internal server error' : err.message
+        error: err.message || 'Internal server error',
+        code: err.code || null,
+        stack: process.env.NODE_ENV !== 'production' ? err.stack : undefined
     });
 });
 
