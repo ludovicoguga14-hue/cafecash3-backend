@@ -10,7 +10,7 @@
  *
  * Repairs mangled newlines in the private key (fixes 16 UNAUTHENTICATED).
  */
-
+console.log('🔥🔥🔥 CAFECASH DEPLOY CHECK v1 - ' + new Date().toISOString());
 const admin = require('firebase-admin');
 const fs = require('fs');
 const path = require('path');
