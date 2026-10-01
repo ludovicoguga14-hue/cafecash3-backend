@@ -1,132 +1,35 @@
-const { admin, firestore } = require('../firebase');
+/**
+ * Environment validation
+ */
+const REQUIRED_PROD = ['FIREBASE_PROJECT_ID', 'JWT_SECRET'];
 
-async function authenticate(req, res, next) {
-    const header = req.headers.authorization;
+function validateEnv() {
+    const isProd = process.env.NODE_ENV === 'production';
+    const missing = REQUIRED_PROD.filter(k => !process.env[k]);
 
-    if (!header || !header.startsWith('Bearer ')) {
-        return res.status(401).json({ success: false, error: 'No token provided' });
+    const hasB64 = !!process.env.FIREBASE_SERVICE_ACCOUNT_B64;
+    const hasPath = !!process.env.FIREBASE_SERVICE_ACCOUNT_PATH;
+    const hasInline = !!process.env.FIREBASE_SERVICE_ACCOUNT;
+
+    if (!hasB64 && !hasPath && !hasInline) {
+        missing.push('FIREBASE_SERVICE_ACCOUNT_B64 (or _PATH or _ACCOUNT)');
     }
 
-    const idToken = header.slice(7);
-
-    try {
-        const decoded = await admin.auth().verifyIdToken(idToken);
-
-        const userDoc = await firestore.collection('users').doc(decoded.uid).get();
-        if (!userDoc.exists) {
-            return res.status(401).json({
-                success: false,
-                error: 'User profile not found'
-            });
-        }
-
-        const user = { uid: decoded.uid, ...userDoc.data() };
-
-        // Auto-downgrade expired premium
-        if (user.plan === 'premium' && user.planExpiresAt) {
-            const expiresAt = user.planExpiresAt.toDate
-                ? user.planExpiresAt.toDate()
-                : new Date(user.planExpiresAt);
-            if (expiresAt < new Date()) {
-                await firestore.collection('users').doc(decoded.uid).update({
-                    plan: 'basic',
-                    planExpiresAt: null
-                });
-                user.plan = 'basic';
-                user.planExpiresAt = null;
-            }
-        }
-
-        const ctx = await resolveContext(decoded.uid, req, user);
-
-        req.user = user;
-        req.user.universityId = ctx.university ? ctx.university.id : null;
-        req.user.university = ctx.university || null;
-        req.user.cafeId = ctx.cafe ? ctx.cafe.id : null;
-        req.user.activeCafe = ctx.cafe || null;
-        req.user.timezone = ctx.cafe ? ctx.cafe.timezone : 'Africa/Johannesburg';
-        req.user.role = user.role || 'manager';
-
-        next();
-    } catch (err) {
-        console.error('❌ Auth failed:', { code: err.code, message: err.message });
-        return res.status(401).json({
-            success: false,
-            error: err.code === 'auth/id-token-expired'
-                ? 'Token expired'
-                : 'Invalid or unauthorized token'
-        });
+    if (isProd && missing.length) {
+        console.error('❌ FATAL: Missing env vars:');
+        missing.forEach(k => console.error('   • ' + k));
+        process.exit(1);
     }
+
+    if (!isProd && missing.length) {
+        missing.forEach(k => console.warn('⚠️  ' + k + ' not set (dev mode OK)'));
+    }
+
+    console.log('✅ Env validated (' + (isProd ? 'production' : 'development') + ')');
+    if (hasB64) console.log('   Firebase: Base64 env var');
+    else if (hasPath) console.log('   Firebase: file path');
+    else if (hasInline) console.log('   Firebase: inline JSON');
 }
 
-async function resolveContext(uid, req, user) {
-    const unisSnap = await firestore
-        .collection('users').doc(uid)
-        .collection('universities').get();
-
-    if (unisSnap.empty) return { university: null, cafe: null };
-
-    const universities = unisSnap.docs.map(d => ({ id: d.id, ...d.data() }));
-    const allCafes = [];
-
-    for (const uDoc of unisSnap.docs) {
-        const cafesSnap = await firestore
-            .collection('users').doc(uid)
-            .collection('universities').doc(uDoc.id)
-            .collection('cafes').get();
-
-        cafesSnap.forEach(cDoc => {
-            allCafes.push({ id: cDoc.id, ...cDoc.data(), universityId: uDoc.id });
-        });
-    }
-
-    const headerCafeId = req.headers['x-cafe-id'];
-    if (headerCafeId) {
-        const cafe = allCafes.find(c => c.id === headerCafeId);
-        if (cafe) return {
-            university: universities.find(u => u.id === cafe.universityId),
-            cafe
-        };
-    }
-
-    if (user.lastActiveCafeId) {
-        const cafe = allCafes.find(c => c.id === user.lastActiveCafeId);
-        if (cafe) return {
-            university: universities.find(u => u.id === cafe.universityId),
-            cafe
-        };
-    }
-
-    if (allCafes.length > 0) {
-        const cafe = allCafes[0];
-        return {
-            university: universities.find(u => u.id === cafe.universityId),
-            cafe
-        };
-    }
-
-    return { university: universities[0], cafe: null };
-}
-
-function requirePremium(req, res, next) {
-    if (!req.user || req.user.plan !== 'premium') {
-        return res.status(403).json({
-            success: false,
-            error: 'Premium required',
-            upgrade: true
-        });
-    }
-    next();
-}
-
-function requireCafe(req, res, next) {
-    if (!req.user || !req.user.cafeId) {
-        return res.status(400).json({
-            success: false,
-            error: 'No active cafeteria'
-        });
-    }
-    next();
-}
-
-module.exports = { authenticate, requirePremium, requireCafe, resolveContext };
+// ═══ CRITICAL: Export the function ═══
+module.exports = { validateEnv };
