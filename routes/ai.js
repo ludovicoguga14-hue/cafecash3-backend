@@ -1,66 +1,97 @@
 const express = require('express');
 const { authenticate, requireCafe } = require('../middleware/auth');
-const { ask } = require('../ai/engine');
-const { forecastStock } = require('../ai/predictors/stockForecast');
+const { firestore } = require('../firebase');
 
 const router = express.Router();
 router.use(authenticate);
 
-router.post('/ask', async (req, res, next) => {
+router.get('/insights', requireCafe, async (req, res, next) => {
     try {
-        const { message, cafeId, history } = req.body;
-        if (!message) return res.status(400).json({ success: false, error: 'Message required' });
+        const today = new Date().toISOString().slice(0, 10);
+        const monthAgo = new Date(Date.now() - 30 * 86400000).toISOString().slice(0, 10);
 
-        const response = await ask({
-            uid: req.user.uid,
-            cafeId: cafeId || req.user.cafeId,
-            message,
-            history: Array.isArray(history) ? history : []
+        const salesSnap = await firestore
+            .collection('users').doc(req.user.uid)
+            .collection('universities').doc(req.user.universityId)
+            .collection('cafes').doc(req.user.cafeId)
+            .collection('sales')
+            .where('date', '>=', monthAgo)
+            .where('date', '<=', today)
+            .get();
+
+        const sales = salesSnap.docs.map(d => d.data());
+
+        const itemSales = {};
+        sales.forEach(s => {
+            itemSales[s.itemName] = (itemSales[s.itemName] || 0) + (s.qty || 0);
         });
 
-        res.json({ success: true, data: response });
-    } catch (err) { next(err); }
-});
+        const itemsSnap = await firestore
+            .collection('users').doc(req.user.uid)
+            .collection('universities').doc(req.user.universityId)
+            .collection('cafes').doc(req.user.cafeId)
+            .collection('items').get();
 
-router.get('/insights', async (req, res, next) => {
-    try {
-        if (!req.user.activeCafe) {
-            return res.json({ success: true, data: [], forecast: [] });
-        }
+        const items = itemsSnap.docs.map(d => d.data());
 
-        const forecast = await forecastStock(req.user.uid, req.user.activeCafe);
-        const critical = forecast.filter(f => f.status === 'critical');
-        const warning = forecast.filter(f => f.status === 'warning');
+        const lowStock = items.filter(i => (i.qty || 0) <= (i.lowStockThreshold || 5));
 
         const insights = [];
-        if (critical.length) {
-            insights.push({
-                type: 'critical',
-                icon: '🚨',
-                title: `${critical.length} item(s) will run out soon`,
-                text: critical.slice(0, 3).map(i => `${i.name} (~${i.daysLeft}d)`).join(', ')
-            });
-        }
-        if (warning.length) {
+        if (lowStock.length) {
             insights.push({
                 type: 'warning',
                 icon: '⚠️',
-                title: `${warning.length} item(s) running low`,
-                text: warning.slice(0, 3).map(i => i.name).join(', ')
+                title: lowStock.length + ' item(s) running low',
+                text: lowStock.slice(0, 3).map(i => i.name).join(', ')
             });
         }
 
-        res.json({ success: true, data: insights, forecast: forecast.slice(0, 10) });
+        res.json({ success: true, data: insights, forecast: [] });
     } catch (err) { next(err); }
 });
 
-router.get('/production-plan', requireCafe, async (req, res, next) => {
+router.post('/ask', requireCafe, async (req, res, next) => {
     try {
-        const { analyzeProduction } = require('../ai/analyzers/production');
-        const { buildContext } = require('../ai/context');
-        const ctx = await buildContext(req.user.uid, req.user.cafeId);
-        const plan = analyzeProduction(ctx);
-        res.json({ success: true, data: plan });
+        const { message } = req.body;
+        if (!message) return res.status(400).json({ success: false, error: 'Message required' });
+
+        const lower = message.toLowerCase();
+
+        // Simple local AI — reads real data
+        const today = new Date().toISOString().slice(0, 10);
+
+        const salesSnap = await firestore
+            .collection('users').doc(req.user.uid)
+            .collection('universities').doc(req.user.universityId)
+            .collection('cafes').doc(req.user.cafeId)
+            .collection('sales')
+            .where('date', '==', today)
+            .get();
+
+        const todaySales = salesSnap.docs.map(d => d.data());
+        const revenue = todaySales.reduce((s, x) => s + (x.revenue || 0), 0);
+        const orders = todaySales.length;
+
+        let reply = '';
+
+        if (lower.includes('sold') || lower.includes('revenue') || lower.includes('today')) {
+            reply = `Today you made R${revenue.toFixed(2)} from ${orders} order(s).`;
+        } else if (lower.includes('low') || lower.includes('stock')) {
+            const itemsSnap = await firestore
+                .collection('users').doc(req.user.uid)
+                .collection('universities').doc(req.user.universityId)
+                .collection('cafes').doc(req.user.cafeId)
+                .collection('items').get();
+            const low = itemsSnap.docs.map(d => d.data()).filter(i => (i.qty || 0) <= (i.lowStockThreshold || 5));
+            reply = low.length ? `Low stock: ${low.map(i => i.name + ' (' + i.qty + ')').join(', ')}` : 'All stock is fine.';
+        } else {
+            reply = `I can help with sales, stock, profit, or waste. Ask me anything about your business.`;
+        }
+
+        res.json({
+            success: true,
+            data: { text: reply, intent: 'general', provider: 'local' }
+        });
     } catch (err) { next(err); }
 });
 
