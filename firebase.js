@@ -61,6 +61,16 @@ if (!admin.apps.length) {
         }
     }
 
+    // ═══════════════════════════════════════════════════════════
+    // FIX: Normalize the private key — repairs \n mangling
+    // ═══════════════════════════════════════════════════════════
+    if (serviceAccount && serviceAccount.private_key) {
+        serviceAccount.private_key = serviceAccount.private_key
+            .replace(/\\n/g, '\n')     // literal \n → real newline
+            .replace(/\r\n/g, '\n')     // CRLF → LF
+            .trim() + '\n';             // ensure trailing newline
+    }
+
     // Validate
     if (serviceAccount) {
         const required = ['type', 'project_id', 'private_key', 'client_email'];
@@ -76,6 +86,7 @@ if (!admin.apps.length) {
             console.log('   Project      : ' + serviceAccount.project_id);
             console.log('   Client email : ' + serviceAccount.client_email);
             console.log('   Key length   : ' + key.length);
+            console.log('   Key starts   : ' + JSON.stringify(key.substring(0, 40)));
             console.log('   Key valid    : ' + (keyOk ? '✅ yes' : '❌ no'));
 
             if (!keyOk) {
