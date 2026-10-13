@@ -1,3 +1,4 @@
+```js
 const express = require('express');
 const { authenticate } = require('../middleware/auth');
 const { firestore, admin } = require('../firebase');
@@ -7,20 +8,22 @@ const router = express.Router();
 
 /**
  * POST /api/auth/sync
- *
  * Firebase authentication + self-healing:
  * User → University → Café
  */
 router.post('/sync', async (req, res, next) => {
     try {
-        // ---------------------------------------------------------
-        // 1. Get Authorization header
-        // ---------------------------------------------------------
+        console.log('🔍 /auth/sync request received');
+        console.log(
+            '🔍 Admin project:',
+            admin.app().options.projectId || 'NOT SET'
+        );
+
+        // 1. Check Authorization header
         const header = req.headers.authorization;
 
         if (!header) {
-            console.warn('⚠️ /auth/sync called without Authorization header');
-
+            console.warn('⚠️ Missing Authorization header');
             return res.status(401).json({
                 success: false,
                 error: 'No authentication token provided'
@@ -29,7 +32,6 @@ router.post('/sync', async (req, res, next) => {
 
         if (!header.startsWith('Bearer ')) {
             console.warn('⚠️ Invalid Authorization header format');
-
             return res.status(401).json({
                 success: false,
                 error: 'Invalid authentication header format'
@@ -39,26 +41,22 @@ router.post('/sync', async (req, res, next) => {
         const token = header.slice(7).trim();
 
         if (!token) {
-            console.warn('⚠️ Empty Firebase token');
-
             return res.status(401).json({
                 success: false,
                 error: 'Empty authentication token'
             });
         }
 
-        // ---------------------------------------------------------
         // 2. Verify Firebase ID token
-        // ---------------------------------------------------------
         let decoded;
 
         try {
+            console.log('🔍 Checking Firebase token...');
+
             decoded = await admin.auth().verifyIdToken(token);
 
             console.log('✅ Firebase token verified');
             console.log('👤 UID:', decoded.uid);
-            console.log('📧 Email:', decoded.email || 'No email');
-
         } catch (err) {
             console.error('❌ Firebase token verification failed');
             console.error('❌ Error code:', err.code || 'UNKNOWN');
@@ -72,9 +70,7 @@ router.post('/sync', async (req, res, next) => {
             });
         }
 
-        // ---------------------------------------------------------
-        // 3. Get information sent by frontend
-        // ---------------------------------------------------------
+        // 3. Read frontend data
         const {
             name,
             universityName,
@@ -83,15 +79,12 @@ router.post('/sync', async (req, res, next) => {
             currency
         } = req.body || {};
 
-        // ---------------------------------------------------------
-        // 4. Get/create user
-        // ---------------------------------------------------------
-        const userRef = firestore
-            .collection('users')
-            .doc(decoded.uid);
+        // 4. Get or create user
+        const userRef = firestore.collection('users').doc(decoded.uid);
+
+        console.log('🔍 Token verified. Checking Firestore access...');
 
         let userDoc = await userRef.get();
-
         let isNew = false;
 
         if (!userDoc.exists) {
@@ -108,27 +101,21 @@ router.post('/sync', async (req, res, next) => {
                 createdAt: new Date()
             });
 
-            console.log('✅ User created:', decoded.uid);
+            console.log('✅ User created');
 
-            // Audit logging should never break authentication
             try {
                 db.logAudit({
                     uid: decoded.uid,
                     action: 'user_created'
                 });
             } catch (auditError) {
-                console.warn(
-                    '⚠️ Audit log failed:',
-                    auditError.message
-                );
+                console.warn('⚠️ Audit log failed:', auditError.message);
             }
         } else {
-            console.log('✅ Existing user:', decoded.uid);
+            console.log('✅ Existing user found');
         }
 
-        // ---------------------------------------------------------
         // 5. Ensure university exists
-        // ---------------------------------------------------------
         const unisSnap = await userRef
             .collection('universities')
             .limit(1)
@@ -149,19 +136,12 @@ router.post('/sync', async (req, res, next) => {
                 });
 
             console.log('✅ University created:', universityRef.id);
-
         } else {
             universityRef = unisSnap.docs[0].ref;
-
-            console.log(
-                '✅ Existing university:',
-                universityRef.id
-            );
+            console.log('✅ Existing university:', universityRef.id);
         }
 
-        // ---------------------------------------------------------
         // 6. Ensure café exists
-        // ---------------------------------------------------------
         const cafesSnap = await universityRef
             .collection('cafes')
             .limit(1)
@@ -184,19 +164,12 @@ router.post('/sync', async (req, res, next) => {
                 });
 
             console.log('✅ Café created:', cafeRef.id);
-
         } else {
             cafeRef = cafesSnap.docs[0].ref;
-
-            console.log(
-                '✅ Existing café:',
-                cafeRef.id
-            );
+            console.log('✅ Existing café:', cafeRef.id);
         }
 
-        // ---------------------------------------------------------
-        // 7. Set active café if one isn't already selected
-        // ---------------------------------------------------------
+        // 7. Set active café if none is selected
         const freshUserSnapshot = await userRef.get();
         const freshUser = freshUserSnapshot.data() || {};
 
@@ -205,30 +178,15 @@ router.post('/sync', async (req, res, next) => {
                 lastActiveCafeId: cafeRef.id
             });
 
-            console.log(
-                '✅ Active café set:',
-                cafeRef.id
-            );
-        } else {
-            console.log(
-                '✅ Existing active café:',
-                freshUser.lastActiveCafeId
-            );
+            console.log('✅ Active café set:', cafeRef.id);
         }
 
-        // ---------------------------------------------------------
         // 8. Get final user document
-        // ---------------------------------------------------------
         const finalSnapshot = await userRef.get();
         const finalUser = finalSnapshot.data() || {};
 
-        // ---------------------------------------------------------
-        // 9. Send successful response
-        // ---------------------------------------------------------
+        // 9. Success
         console.log('✅ CafeCash authentication sync complete');
-        console.log('👤 UID:', decoded.uid);
-        console.log('🏫 University:', universityRef.id);
-        console.log('🍽️ Café:', cafeRef.id);
 
         return res.json({
             success: true,
@@ -240,39 +198,24 @@ router.post('/sync', async (req, res, next) => {
         });
 
     } catch (err) {
-        // ---------------------------------------------------------
-        // 10. Unexpected server error
-        // ---------------------------------------------------------
         console.error('❌ Auth sync server error');
-        console.error('❌ Error:', err.message);
+        console.error('❌ Error code:', err.code || 'UNKNOWN');
+        console.error('❌ Error message:', err.message || 'Unknown error');
         console.error('❌ Stack:', err.stack);
 
         next(err);
     }
 });
 
-
 /**
  * GET /api/auth/me
- *
- * Returns the currently authenticated CafeCash user.
  */
 router.get('/me', authenticate, (req, res) => {
-    try {
-        return res.json({
-            success: true,
-            data: req.user
-        });
-
-    } catch (err) {
-        console.error('❌ /auth/me error:', err.message);
-
-        return res.status(500).json({
-            success: false,
-            error: 'Unable to retrieve authenticated user'
-        });
-    }
+    return res.json({
+        success: true,
+        data: req.user
+    });
 });
 
-
 module.exports = router;
+```
